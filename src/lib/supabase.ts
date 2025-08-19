@@ -11,12 +11,22 @@ export const callSupabaseFunction = async (functionName: string, body: any) => {
   }
 
   // Production mode: call Supabase function
-  const { data, error } = await supabase.functions.invoke(functionName, {
-    body: JSON.stringify(body),
-  })
+  try {
+    const { data, error } = await supabase.functions.invoke(functionName, {
+      body: JSON.stringify(body),
+    })
 
-  if (error) throw error
-  return data
+    if (error) throw error
+    return data
+  } catch (err) {
+    console.warn('Supabase function invoke failed, considering fallback:', err)
+    // Fallback only for PDF extraction if Edge Functions are not available
+    if (functionName === 'extract-pdf-text') {
+      console.log('Falling back to direct PDF.co processing in production')
+      return await processPDFWithPDFCo(body)
+    }
+    throw err
+  }
 }
 
 // Direct PDF.co API integration for development
