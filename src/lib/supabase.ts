@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import { config } from './config'
+import { generateWithGemini } from './utils'
 
 export const supabase = createClient(config.supabase.url, config.supabase.anonKey)
 
@@ -24,6 +25,32 @@ export const callSupabaseFunction = async (functionName: string, body: any) => {
     if (functionName === 'extract-pdf-text') {
       console.log('Falling back to direct PDF.co processing in production')
       return await processPDFWithPDFCo(body)
+    }
+    
+    // Fallback for quiz question generation using Gemini in production
+    if (functionName === 'generate-quiz-questions' && config.gemini?.apiKey) {
+      console.log('Falling back to Gemini for quiz generation in production')
+      const pdfContent: string = body?.pdfContent || ''
+      const requestedCount: number = typeof body?.questionCount === 'number' ? body.questionCount : 10
+      try {
+        const prompt = `Based on the following PDF content, generate exactly ${requestedCount} multiple choice questions in JSON format.
+Each question must have: id, question, options (4), correctAnswer (0-3), difficulty (easy|intermediate|advanced|logical|mathematical), explanation.
+
+PDF Content (truncated):\n${pdfContent.substring(0, 8000)}\n
+Return ONLY a JSON object like: { "questions": [...], "hasMathContent": boolean }`;
+        let text = await generateWithGemini(prompt, config.gemini.apiKey)
+        text = text.replace(/```json\n?/g, '').replace(/```/g, '')
+        const parsed = JSON.parse(text)
+        const questions = Array.isArray(parsed?.questions) ? parsed.questions : []
+        const validQuestions = questions.filter((q: any) =>
+          q && q.id && q.question && Array.isArray(q.options) && q.options.length === 4 &&
+          typeof q.correctAnswer === 'number' && q.difficulty && q.explanation
+        )
+        return { success: true, questions: validQuestions.slice(0, requestedCount), hasMathContent: !!parsed?.hasMathContent }
+      } catch (e) {
+        console.error('Gemini fallback failed for quiz generation:', e)
+        throw err
+      }
     }
     throw err
   }
