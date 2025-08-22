@@ -18,7 +18,7 @@ serve(async (req) => {
   }
 
   try {
-    const { pdfContent } = await req.json()
+    const { pdfContent, questionCount } = await req.json()
 
     if (!pdfContent) {
       return new Response(
@@ -37,6 +37,9 @@ serve(async (req) => {
     console.log('PDF Content length:', pdfContent.length)
     console.log('Generating questions using Gemini AI...')
 
+    // Determine requested count with sane defaults and bounds
+    const requestedCount = Math.min(Math.max(Number(questionCount) || 10, 1), 50)
+
     // Call Gemini API to generate questions based on actual PDF content
     const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`, {
       method: 'POST',
@@ -46,12 +49,7 @@ serve(async (req) => {
       body: JSON.stringify({
         contents: [{
           parts: [{
-            text: `Based on the following PDF content, generate exactly 25 multiple choice questions in JSON format. The questions should be distributed as follows:
-            - 4 easy questions (basic comprehension)
-            - 5 intermediate questions (analysis and application) 
-            - 5 advanced questions (synthesis and evaluation)
-            - 6 logical questions (reasoning and inference)
-            - 5 mathematical questions (only if mathematical content is present, otherwise skip these)
+            text: `Based on the following PDF content, generate exactly ${requestedCount} multiple choice questions in JSON format. Aim for a balanced mix across: easy, intermediate, advanced, logical, and mathematical (include mathematical only if the content warrants it).
 
             For each question, provide:
             - id: unique identifier (e.g., "easy1", "intermediate1", etc.)
@@ -114,7 +112,7 @@ serve(async (req) => {
 
     return new Response(
       JSON.stringify({ 
-        questions: validQuestions,
+        questions: validQuestions.slice(0, requestedCount),
         hasMathContent,
         success: true 
       }),

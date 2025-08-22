@@ -65,13 +65,14 @@ Return ONLY a JSON object like: { "questions": [...], "hasMathContent": boolean 
       }
 
       // Production mode: call Supabase function
-      const result = await callSupabaseFunction('generate-quiz-questions', { pdfContent });
+      const result = await callSupabaseFunction('generate-quiz-questions', { pdfContent, questionCount });
       
       if (!result.success) {
         throw new Error(result.error || 'Failed to generate questions');
       }
 
-      return result.questions || [];
+      // Ensure we honor the selected count even if backend returns more
+      return (result.questions || []).slice(0, questionCount);
     } catch (error) {
       console.error('Question generation error:', error);
       
