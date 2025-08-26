@@ -2,25 +2,12 @@ import { createClient } from '@supabase/supabase-js'
 import { config } from './config'
 import { generateWithGemini } from './utils'
 
-// Prefer calling Edge Functions via the dedicated functions subdomain to avoid DNS issues with the project domain
-const resolvedFunctionsUrl = (() => {
-  try {
-    const url = new URL(config.supabase.url)
-    const projectRef = url.hostname.split('.')[0]
-    return `https://${projectRef}.functions.supabase.co`
-  } catch {
-    return undefined
-  }
-})()
-
-export const supabase = createClient(config.supabase.url, config.supabase.anonKey, {
-  functions: resolvedFunctionsUrl ? { url: resolvedFunctionsUrl } : undefined,
-})
+export const supabase = createClient(config.supabase.url, config.supabase.anonKey)
 
 export const callSupabaseFunction = async (functionName: string, body: any) => {
-  // In development mode, use local PDF processing with PDF.co API
-  if (config.isDevelopment) {
-    console.log('Development mode: Using PDF.co API directly')
+  // In development mode, only intercept extract-pdf-text to use local PDF.co processing
+  if (config.isDevelopment && functionName === 'extract-pdf-text') {
+    console.log('Development mode: Using PDF.co API directly for text extraction')
     return await processPDFWithPDFCo(body)
   }
 
@@ -62,6 +49,21 @@ Return ONLY a JSON object like: { "questions": [...], "hasMathContent": boolean 
         return { success: true, questions: validQuestions.slice(0, requestedCount), hasMathContent: !!parsed?.hasMathContent }
       } catch (e) {
         console.error('Gemini fallback failed for quiz generation:', e)
+        throw e
+      }
+    }
+    
+    // Fallback for answering questions using Gemini in production
+    if (functionName === 'answer-pdf-question' && config.gemini?.apiKey) {
+      console.log('Falling back to Gemini for answer generation in production')
+      const pdfContent: string = body?.pdfContent || ''
+      const question: string = body?.question || ''
+      try {
+        const prompt = `Return direct, specific answers without prefacing like "The provided text". If the answer is not in the PDF, say so plainly.\n\nQuestion: ${question}\nFile Name: ${body?.fileName || ''}\nPDF Excerpt (truncated):\n${pdfContent.substring(0, 15000)}\n\nAnswer:`
+        const text = await generateWithGemini(prompt, config.gemini.apiKey)
+        return { success: true, answer: text }
+      } catch (e) {
+        console.error('Gemini fallback failed for answer generation:', e)
         throw e
       }
     }
@@ -179,9 +181,102 @@ async function processPDFWithPDFCo(body: any) {
 
   } catch (error) {
     console.error('PDF.co API processing error:', error)
+    
+    // Check if it's a credit/402 error and fallback to browser-based extraction
+    if (error.message.includes('402') || error.message.includes('credits') || error.message.includes('subscription')) {
+      console.log('PDF.co credits exhausted, falling back to browser-based PDF extraction')
+      try {
+        return await processPDFWithBrowser(body)
+      } catch (browserError) {
+        console.error('Browser-based PDF extraction also failed:', browserError)
+        return {
+          error: `PDF processing failed: ${error.message}. Browser extraction also failed: ${browserError.message}`,
+          success: false
+        }
+      }
+    }
+    
     return {
       error: error.message,
       success: false
     }
   }
+}
+
+// Browser-based PDF text extraction using PDF.js
+async function processPDFWithBrowser(body: any) {
+  try {
+    const { fileData, fileName } = body
+    
+    console.log('Processing PDF with browser-based extraction:', fileName)
+    
+    // Convert base64 to ArrayBuffer
+    const binaryString = atob(fileData)
+    const bytes = new Uint8Array(binaryString.length)
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i)
+    }
+    
+    // Load PDF.js from CDN if not already loaded
+    if (typeof window !== 'undefined' && !(window as any).pdfjsLib) {
+      await loadPDFJS()
+    }
+    
+    // Use PDF.js to extract text
+    const pdfjsLib = (window as any).pdfjsLib
+    if (!pdfjsLib) {
+      throw new Error('PDF.js library not available')
+    }
+    
+    const loadingTask = pdfjsLib.getDocument({ data: bytes })
+    const pdf = await loadingTask.promise
+    
+    let extractedText = ''
+    
+    // Extract text from all pages
+    for (let pageNum = 1; pageNum <= Math.min(pdf.numPages, 50); pageNum++) {
+      const page = await pdf.getPage(pageNum)
+      const textContent = await page.getTextContent()
+      
+      // Combine text items
+      const pageText = textContent.items
+        .map((item: any) => item.str)
+        .join(' ')
+      
+      extractedText += pageText + '\n\n'
+    }
+    
+    console.log('Browser-based PDF processing completed successfully')
+    console.log('Extracted text length:', extractedText.length)
+    
+    return {
+      text: extractedText.trim() || `Unable to extract text from ${fileName}. This may be an image-based PDF.`,
+      success: true
+    }
+    
+  } catch (error) {
+    console.error('Browser-based PDF processing error:', error)
+    throw error
+  }
+}
+
+// Load PDF.js library from CDN
+async function loadPDFJS() {
+  return new Promise<void>((resolve, reject) => {
+    if (typeof window === 'undefined') {
+      reject(new Error('PDF.js can only be loaded in browser environment'))
+      return
+    }
+    
+    const script = document.createElement('script')
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js'
+    script.onload = () => {
+      // Set worker path
+      const pdfjsLib = (window as any).pdfjsLib
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+      resolve()
+    }
+    script.onerror = () => reject(new Error('Failed to load PDF.js library'))
+    document.head.appendChild(script)
+  })
 }
